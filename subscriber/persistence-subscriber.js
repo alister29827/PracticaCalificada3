@@ -1,5 +1,3 @@
-// /subscriber/persistence-subscriber.js
-
 const mqtt = require('mqtt');
 const { InfluxDB, Point } = require('@influxdata/influxdb-client');
 const config = require('../config'); // Nuestra config MQTT
@@ -16,8 +14,9 @@ const topic = config.topics.telemetry('+'); // Escucha telemetría de todos los 
 const clientId = `persistence_sub_${Math.random().toString(16).slice(2, 8)}`;
 
 // --- Configuración Reloj Vectorial ---
-const VECTOR_PROCESS_COUNT = 3;
-const PROCESS_ID = parseInt(process.env.PROCESS_ID || '2'); // Nuestro ID es 2
+// NOTA: Ajustado a 5 para coincidir con los 5 sensores de la Fase 0
+const VECTOR_PROCESS_COUNT = 5; 
+const PROCESS_ID = parseInt(process.env.PROCESS_ID || '99'); // Usamos 99 para el suscriptor para no chocar con sensores
 let vectorClock = new Array(VECTOR_PROCESS_COUNT).fill(0);
 
 // --- Reloj Lógico de Lamport para el suscriptor ---
@@ -51,19 +50,36 @@ mqttClient.on('error', (error) => {
 
 // --- Procesamiento de Mensajes ---
 mqttClient.on('message', (receivedTopic, message) => {
-  // --- REGLA 3 (LAMPORT): Parte 1 (Evento Interno) ---
-  // Incrementamos nuestro reloj local por el evento de "recibir mensaje".
+  
+  // --- REGLA 1 (VECTORIAL): Evento interno ---
+  // El suscriptor (si tuviera ID dentro del rango) actualizaría su reloj, 
+  // pero como es observador, mantenemos su lógica de incrementar para marcar recepción.
+  // Nota: Si PROCESS_ID es 99, esto no afectará al array de tamaño 5, lo cual es correcto para un sink pasivo.
   lamportClock++;
 
- // --- REGLA 1 (VECTORIAL): Evento interno ---
-  // El evento de "recibir" incrementa nuestro propio reloj (P_2)
-  vectorClock[PROCESS_ID]++; 
-
   console.log(`\n[MSG] Mensaje recibido en [${receivedTopic}]`);
+
   try {
     const data = JSON.parse(message.toString());
     const deviceId = data.deviceId;
 
+    // =====================================================================
+    //           [FASE 1] BARRERA DE ENTRADA TEMPORAL (CORREGIDA PROFE)
+    // =====================================================================
+    // Verificar si el mensaje viene del futuro
+    if (data.timestamp) {
+      const msgTime = new Date(data.timestamp).getTime();
+      const localTime = Date.now();
+      const difference = msgTime - localTime;
+
+      // Umbral de 2000ms (2 segundos)
+      if (difference > 2000) {
+         // Si msgTime > localTime + 2s -> DESCARTAR.
+         console.warn(`[SECURITY] RECHAZADO: Paquete del futuro detectado de ${deviceId}. Diff: ${difference}ms.`);
+         return; 
+      }
+    }
+   
     // --- REGLA 3 (LAMPORT): Parte 2 (Fusión) ---
     const receivedLamportTS = data.lamport_ts || 0;
     lamportClock = Math.max(lamportClock, receivedLamportTS);
@@ -71,11 +87,14 @@ mqttClient.on('message', (receivedTopic, message) => {
 
     // --- REGLA 3 (VECTORIAL): Parte 2 (Fusión) ---
     const receivedVectorClock = data.vector_clock || new Array(VECTOR_PROCESS_COUNT).fill(0);
+    
     // Fusionamos los relojes: tomamos el máximo de cada posición
+    // Aseguramos que los arrays tengan el mismo tamaño antes de iterar
     for (let i = 0; i < VECTOR_PROCESS_COUNT; i++) {
-      vectorClock[i] = Math.max(vectorClock[i], receivedVectorClock[i]);
+      const receivedVal = receivedVectorClock[i] || 0;
+      vectorClock[i] = Math.max(vectorClock[i] || 0, receivedVal);
     }
-    console.log(`[VECTOR] Reloj local actualizado a: [${vectorClock.join(',')}] (recibido: [${receivedVectorClock.join(',')}])`);
+    console.log(`[VECTOR] Reloj local actualizado a: [${vectorClock.join(',')}]`);
 
     if (!deviceId || data.temperatura === undefined || data.humedad === undefined) {
       console.warn('[WARN] Mensaje incompleto recibido, ignorando:', data);
@@ -93,7 +112,6 @@ mqttClient.on('message', (receivedTopic, message) => {
       .tag('lamport_ts_persistence', lamportClock.toString())
 
       // --- NUEVO: Añadimos relojes vectoriales a InfluxDB ---
-      // (InfluxDB no soporta arrays nativos, los guardamos como strings)
       .tag('vector_clock_sensor', JSON.stringify(receivedVectorClock))
       .tag('vector_clock_persistence', JSON.stringify(vectorClock))
 
@@ -104,14 +122,13 @@ mqttClient.on('message', (receivedTopic, message) => {
     // Escribir el punto en InfluxDB
     writeApi.writePoint(point);
     
-   // Forzar el envío inmediato de los datos
+    // Forzar el envío inmediato de los datos
     writeApi.flush()
       .then(() => {
         console.log('[DB] Punto escrito exitosamente en InfluxDB.');
       })
       .catch(error => {
         console.error('[ERROR] Error al escribir en InfluxDB:', error);
-        // En esta sección se podría implementar lógica de reintento o dead-letter queue
       });
 
   } catch (error) {

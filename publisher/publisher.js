@@ -109,11 +109,31 @@ client.on('message', (topic, message) => {
     }
   }
 
-  // --- 4. SINCRONIZACIÓN DE RELOJ (CRISTIAN) ---
+// --- 4. SINCRONIZACIÓN DE RELOJ (CRISTIAN MEJORADO - FASE 1) ---
+  // AQUI ESTÁ LA CORRECCIÓN SOLICITADA
   if (topic === config.topics.time_response(DEVICE_ID)) {
-    const rtt = Date.now() - (payload.t1 || Date.now()); // Simplificado
-    const correctTime = payload.serverTime + (rtt / 2);
-    clockOffset = correctTime - getSimulatedTime().getTime();
+    const t1 = payload.t1;             // Hora a la que enviamos (cliente)
+    const serverTime = payload.serverTime; 
+    const t4 = Date.now();             // Hora actual de recepción
+    
+    // Calcular RTT
+    const rtt = t4 - t1; 
+
+    // [REQUISITO FASE 1] Validación de RTT
+    // Si el RTT es mayor a 500ms, descartamos la sincronización
+    if (rtt > 500) {
+      console.warn(`[CLOCK] Sincronización DESCARTADA. RTT muy alto: ${rtt}ms (>500ms)`);
+      return; // No actualizamos el reloj, salimos de la función
+    }
+
+    // Si el RTT es aceptable, aplicamos algoritmo de Cristian
+    const correctTime = serverTime + (rtt / 2);
+    
+    // Calculamos el nuevo offset comparando con nuestro reloj simulado
+    const currentSimulated = getSimulatedTime().getTime();
+    clockOffset = correctTime - currentSimulated;
+    
+    console.log(`[CLOCK] Sincronización Exitosa. RTT: ${rtt}ms. Nuevo Offset: ${clockOffset.toFixed(2)}ms`);
   }
 });
 

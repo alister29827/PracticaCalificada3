@@ -1,10 +1,6 @@
 # /docker-compose.yml
-
-# La directiva 'version' es obsoleta en las versiones modernas de Compose
-# version: '3.8'
-
 services:
-  # --- Servicio para el Broker MQTT (Mosquitto) ---
+  # --- Broker MQTT ---
   mqtt-broker:
     image: eclipse-mosquitto:2
     container_name: mqtt-broker
@@ -17,7 +13,7 @@ services:
       - ./mosquitto/log:/mosquitto/log
     restart: unless-stopped
 
-  # --- Servicio para InfluxDB ---
+  # --- Base de Datos ---
   influxdb:
     image: influxdb:2.7
     container_name: influxdb
@@ -34,7 +30,7 @@ services:
       - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=mySuperSecretToken123!
     restart: unless-stopped
 
-  # --- Servicio del Servidor de Tiempo (Cristian) ---
+  # --- Servidor de Tiempo ---
   time-server:
     build: .
     container_name: time-server
@@ -43,56 +39,95 @@ services:
     command: "node time-server/time-server.js"
     restart: on-failure
 
-  # --- Servicio del Coordinador de Bloqueo (Mutex) ---
-  lock-coordinator:
-    build: .
-    container_name: lock-coordinator
-    depends_on:
-      - mqtt-broker
-    command: "node lock-coordinator/lock-coordinator.js"
-    environment:
-      # ID de Proceso para Exclusión Mutua
-      - PROCESS_ID=2
-      # --- NUEVO: Configuración de Elección ---
-      - PROCESS_PRIORITY=10 # El ID más alto, es el líder
-      - ELECTION_PARTICIPANTS=10:lock-coordinator,6:publisher-2,5:publisher-1
-    restart: on-failure
-
-  # --- Servicio para el Publicador (Sensor 1) ---
+  # --- NODOS SENSORES (Escalamiento a 5 nodos) ---
+  
+  # Nodo 1 (Prioridad 10 - La más baja)
   publisher-1:
     build: .
     container_name: publisher-1
     depends_on:
       - mqtt-broker
-      - time-server # Depende del servidor de tiempo
+      - time-server
     command: "node publisher/publisher.js"
     environment:
-      - DEVICE_ID=sensor-001
-      - CLOCK_DRIFT_RATE=500
-      - PROCESS_ID=0
-      # --- NUEVO: Configuración de Elección ---
-      - PROCESS_PRIORITY=5 # El ID más bajo
-      - ELECTION_PARTICIPANTS=10:lock-coordinator,6:publisher-2,5:publisher-1
-    restart: on-failure
+      - DEVICE_ID=sensor-1
+      - PROCESS_PRIORITY=10
+      - PROCESS_ID=1
+      - CLOCK_DRIFT_RATE=0
+      # Lista de todos los participantes para saber quórum
+      - ELECTION_PARTICIPANTS=sensor-1:10,sensor-2:20,sensor-3:30,sensor-4:40,sensor-5:50
+    volumes:
+      - ./wal_logs:/usr/src/app/wal_logs # Volumen para la FASE 3 (Persistencia)
 
-  # --- Servicio para el Publicador (Sensor 2) ---
+  # Nodo 2 (Prioridad 20)
   publisher-2:
     build: .
     container_name: publisher-2
     depends_on:
       - mqtt-broker
-      - time-server # Depende del servidor de tiempo
+      - time-server
     command: "node publisher/publisher.js"
     environment:
-      - DEVICE_ID=sensor-002
-      - CLOCK_DRIFT_RATE=-500
-      - PROCESS_ID=1
-      # --- NUEVO: Configuración de Elección ---
-      - PROCESS_PRIORITY=6 # ID intermedio
-      - ELECTION_PARTICIPANTS=10:lock-coordinator,6:publisher-2,5:publisher-1
-    restart: on-failure
+      - DEVICE_ID=sensor-2
+      - PROCESS_PRIORITY=20
+      - PROCESS_ID=2
+      - CLOCK_DRIFT_RATE=200
+      - ELECTION_PARTICIPANTS=sensor-1:10,sensor-2:20,sensor-3:30,sensor-4:40,sensor-5:50
+    volumes:
+      - ./wal_logs:/usr/src/app/wal_logs
 
-  # --- Servicio para el Suscriptor de Persistencia ---
+  # Nodo 3 (Prioridad 30)
+  publisher-3:
+    build: .
+    container_name: publisher-3
+    depends_on:
+      - mqtt-broker
+      - time-server
+    command: "node publisher/publisher.js"
+    environment:
+      - DEVICE_ID=sensor-3
+      - PROCESS_PRIORITY=30
+      - PROCESS_ID=3
+      - CLOCK_DRIFT_RATE=-200
+      - ELECTION_PARTICIPANTS=sensor-1:10,sensor-2:20,sensor-3:30,sensor-4:40,sensor-5:50
+    volumes:
+      - ./wal_logs:/usr/src/app/wal_logs
+
+  # Nodo 4 (Prioridad 40)
+  publisher-4:
+    build: .
+    container_name: publisher-4
+    depends_on:
+      - mqtt-broker
+      - time-server
+    command: "node publisher/publisher.js"
+    environment:
+      - DEVICE_ID=sensor-4
+      - PROCESS_PRIORITY=40
+      - PROCESS_ID=4
+      - CLOCK_DRIFT_RATE=500
+      - ELECTION_PARTICIPANTS=sensor-1:10,sensor-2:20,sensor-3:30,sensor-4:40,sensor-5:50
+    volumes:
+      - ./wal_logs:/usr/src/app/wal_logs
+
+  # Nodo 5 (Prioridad 50 - Líder inicial esperado)
+  publisher-5:
+    build: .
+    container_name: publisher-5
+    depends_on:
+      - mqtt-broker
+      - time-server
+    command: "node publisher/publisher.js"
+    environment:
+      - DEVICE_ID=sensor-5
+      - PROCESS_PRIORITY=50
+      - PROCESS_ID=5
+      - CLOCK_DRIFT_RATE=0
+      - ELECTION_PARTICIPANTS=sensor-1:10,sensor-2:20,sensor-3:30,sensor-4:40,sensor-5:50
+    volumes:
+      - ./wal_logs:/usr/src/app/wal_logs
+
+  # --- Suscriptor de Persistencia ---
   persistence-subscriber:
     build: .
     container_name: persistence-subscriber
@@ -105,45 +140,9 @@ services:
       - INFLUXDB_TOKEN=mySuperSecretToken123!
       - INFLUXDB_ORG=utp
       - INFLUXDB_BUCKET=sensors
-      - PROCESS_ID=2
-    restart: on-failure
+      - PROCESS_ID=99
 
-  # --- Suscriptores de ejemplo (sin cambios, pero dependen del broker) ---
-  unicast-subscriber:
-    build: .
-    container_name: unicast-subscriber
-    depends_on:
-      - mqtt-broker
-    command: "node subscriber/unicast.js"
-    environment:
-      - DEVICE_ID=sensor-001
-    restart: on-failure
-
-  multicast-subscriber:
-    build: .
-    container_name: multicast-subscriber
-    depends_on:
-      - mqtt-broker
-    command: "node subscriber/multicast.js"
-    restart: on-failure
-
-  broadcast-subscriber:
-    build: .
-    container_name: broadcast-subscriber
-    depends_on:
-      - mqtt-broker
-    command: "node subscriber/broadcast.js"
-    restart: on-failure
-
-  monitor:
-    build: .
-    container_name: monitor
-    depends_on:
-      - mqtt-broker
-    command: "node subscriber/monitor.js"
-    restart: on-failure
-
-  # --- Servicio para el Monitor Web (Frontend) ---
+  # --- Monitor Web ---
   web-monitor:
     image: nginx:1.25-alpine
     container_name: web-monitor
@@ -155,6 +154,5 @@ services:
       - mqtt-broker
     restart: unless-stopped
 
-# --- Definición del volumen para InfluxDB ---
 volumes:
   influxdb_data:
