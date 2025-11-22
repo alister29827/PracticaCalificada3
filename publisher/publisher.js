@@ -1,7 +1,11 @@
-// /publisher/publisher.js
-
 const mqtt = require('mqtt');
 const config = require('../config');
+const fs = require('fs');           // [FASE 3] Necesario para escribir en disco
+const path = require('path');       // [FASE 3] Manejo de rutas
+
+// --- [FASE 3] CONFIGURACIÓN DE WAL (MUTEX) ---
+// Ruta absoluta dentro del contenedor (coincide con volumen docker-compose)
+const WAL_FILE = path.join('/usr/src/app/wal_logs', 'mutex_wal.log');
 
 // --- Configuración Básica ---
 const CLOCK_DRIFT_RATE = parseFloat(process.env.CLOCK_DRIFT_RATE || '0');
@@ -10,31 +14,37 @@ const PROCESS_ID = parseInt(process.env.PROCESS_ID || '0');
 
 // --- Configuración de Elección (Bully) ---
 const MY_PRIORITY = parseInt(process.env.PROCESS_PRIORITY || '0');
-let currentLeaderPriority = 100; // Asumimos que hay alguien superior al inicio
+let currentLeaderPriority = 100; 
 let isCoordinator = false;
 let electionInProgress = false;
 let lastHeartbeatTime = Date.now();
-const HEARTBEAT_INTERVAL = 2000; // Enviar PING cada 2s
-const LEADER_TIMEOUT = 5000;     // Líder muerto si no responde en 5s
-const ELECTION_TIMEOUT = 3000;   // Tiempo espera respuestas ALIVE
+const HEARTBEAT_INTERVAL = 2000; 
+const LEADER_TIMEOUT = 5000;     
+const ELECTION_TIMEOUT = 3000;   
+
+// --- [FASE 2] VARIABLES DE LEASE (ARRENDAMIENTO) ---
+const LEASE_DURATION = 5000;     
+const LEASE_RENEWAL = 2000;      
+let leaseTimeout = null;         
+let lastLeaseSeen = Date.now();  
+const TOPIC_LEASE = 'utp/sistemas_distribuidos/grupo1/election/lease';
 
 // --- Estado Mutex (Cliente) ---
 let sensorState = 'IDLE';
 const CALIBRATION_INTERVAL_MS = 20000 + (Math.random() * 5000);
 const CALIBRATION_DURATION_MS = 5000;
 
-// --- Estado Mutex (Servidor/Coordinador) - SOLO SE USA SI isCoordinator = true ---
+// --- Estado Mutex (Servidor/Coordinador) ---
 let coord_isLockAvailable = true;
 let coord_lockHolder = null;
 let coord_waitingQueue = [];
 
 // --- Sincronización Reloj (Cristian, Lamport, Vector) ---
-// ... (Variables reducidas para brevedad, la lógica se mantiene)
 let lastRealTime = Date.now();
 let lastSimulatedTime = Date.now();
 let clockOffset = 0;
 let lamportClock = 0;
-const VECTOR_PROCESS_COUNT = 3;
+const VECTOR_PROCESS_COUNT = 5; // Ajustado a 5 nodos
 let vectorClock = new Array(VECTOR_PROCESS_COUNT).fill(0);
 
 // --- Conexión MQTT ---
@@ -52,55 +62,51 @@ const client = mqtt.connect(brokerUrl, {
 client.on('connect', () => {
   console.log(`[INFO] ${DEVICE_ID} (Prio: ${MY_PRIORITY}) conectado.`);
 
-  // 1. Suscripciones Básicas
+  // Suscripciones
   client.subscribe(config.topics.time_response(DEVICE_ID));
   client.subscribe(config.topics.mutex_grant(DEVICE_ID));
+  client.subscribe(config.topics.election.heartbeat); 
+  client.subscribe(config.topics.election.messages);  
+  client.subscribe(config.topics.election.coordinator); 
+  client.subscribe(TOPIC_LEASE); // [FASE 2]
 
-  // 2. Suscripciones de Elección
-  client.subscribe(config.topics.election.heartbeat); // Escuchar PONG
-  client.subscribe(config.topics.election.messages);  // Escuchar ELECTION, ALIVE
-  client.subscribe(config.topics.election.coordinator); // Escuchar VICTORY
-
-  // 3. Iniciar Ciclos
-  // A. Telemetría
+  // Timers
   setInterval(publishTelemetry, 5000);
-  // B. Sincronización Reloj (Cristian)
   setInterval(syncClock, 30000);
-  // C. Intentos de Calibración (Cliente Mutex)
   setTimeout(() => { setInterval(requestCalibration, CALIBRATION_INTERVAL_MS); }, 5000);
-
-  // D. Monitoreo del Líder (Heartbeat Check)
   setInterval(checkLeaderStatus, 1000);
-
-  // E. Enviar Heartbeats (PING)
   setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
 
-  // Publicar estado online
   client.publish(statusTopic, JSON.stringify({ deviceId: DEVICE_ID, status: 'online' }), { retain: true });
 });
 
 client.on('message', (topic, message) => {
   const payload = JSON.parse(message.toString());
 
-  // --- 1. MANEJO DE ELECCIÓN (Bully) ---
+  // --- [FASE 2] MANEJO DE LEASES ---
+  if (topic === TOPIC_LEASE) {
+    lastLeaseSeen = Date.now(); 
+    // PROTECCIÓN SPLIT-BRAIN
+    if (isCoordinator && payload.coordinatorId !== DEVICE_ID) {
+       console.warn(`[SPLIT-BRAIN] Detectado otro líder activo (${payload.coordinatorId}). RENUNCIO.`);
+       stepDown();
+    }
+    return;
+  }
+
+  // --- ELECCIÓN ---
   if (topic.startsWith('utp/sistemas_distribuidos/grupo1/election')) {
     handleElectionMessages(topic, payload);
     return;
   }
 
-  // --- 2. SI SOY COORDINADOR: MANEJAR SOLICITUDES MUTEX ---
+  // --- COORDINADOR ---
   if (isCoordinator) {
-    if (topic === config.topics.mutex_request) {
-      handleCoordRequest(payload.deviceId);
-      return;
-    }
-    if (topic === config.topics.mutex_release) {
-      handleCoordRelease(payload.deviceId);
-      return;
-    }
+    if (topic === config.topics.mutex_request) { handleCoordRequest(payload.deviceId); return; }
+    if (topic === config.topics.mutex_release) { handleCoordRelease(payload.deviceId); return; }
   }
 
-  // --- 3. SI SOY CLIENTE: MANEJAR RESPUESTAS ---
+  // --- CLIENTE MUTEX ---
   if (topic === config.topics.mutex_grant(DEVICE_ID)) {
     if (sensorState === 'REQUESTING') {
       console.log(`[MUTEX-CLIENT] Permiso recibido.`);
@@ -109,27 +115,19 @@ client.on('message', (topic, message) => {
     }
   }
 
-// --- 4. SINCRONIZACIÓN DE RELOJ (CRISTIAN MEJORADO - FASE 1) ---
-  // AQUI ESTÁ LA CORRECCIÓN SOLICITADA
+  // --- [FASE 1] SINCRONIZACIÓN DE RELOJ (RTT CHECK) ---
   if (topic === config.topics.time_response(DEVICE_ID)) {
-    const t1 = payload.t1;             // Hora a la que enviamos (cliente)
+    const t1 = payload.t1;             
     const serverTime = payload.serverTime; 
-    const t4 = Date.now();             // Hora actual de recepción
-    
-    // Calcular RTT
+    const t4 = Date.now();             
     const rtt = t4 - t1; 
 
-    // [REQUISITO FASE 1] Validación de RTT
-    // Si el RTT es mayor a 500ms, descartamos la sincronización
     if (rtt > 500) {
       console.warn(`[CLOCK] Sincronización DESCARTADA. RTT muy alto: ${rtt}ms (>500ms)`);
-      return; // No actualizamos el reloj, salimos de la función
+      return; 
     }
 
-    // Si el RTT es aceptable, aplicamos algoritmo de Cristian
     const correctTime = serverTime + (rtt / 2);
-    
-    // Calculamos el nuevo offset comparando con nuestro reloj simulado
     const currentSimulated = getSimulatedTime().getTime();
     clockOffset = correctTime - currentSimulated;
     
@@ -138,22 +136,22 @@ client.on('message', (topic, message) => {
 });
 
 // ============================================================================
-//                          ALGORITMO DE ELECCIÓN (BULLY)
+//                          ALGORITMO DE ELECCIÓN (BULLY + LEASE)
 // ============================================================================
 
 function sendHeartbeat() {
-  // Solo enviamos PING si NO somos el coordinador
   if (!isCoordinator) {
     client.publish(config.topics.election.heartbeat, JSON.stringify({ type: 'PING', fromPriority: MY_PRIORITY }));
   }
 }
 
 function checkLeaderStatus() {
-  if (isCoordinator) return; // Si soy líder, no monitoreo a nadie
-
-  // Si pasó mucho tiempo desde el último PONG o mensaje del líder
-  if (Date.now() - lastHeartbeatTime > LEADER_TIMEOUT) {
-    console.warn(`[BULLY] ¡Líder caído! (Timeout). Iniciando elección.`);
+  if (isCoordinator) return; 
+  const now = Date.now();
+  // [FASE 2] Asesino Silencioso
+  if (now - lastLeaseSeen > LEASE_DURATION) {
+    console.warn(`[BULLY] ¡Lease del Líder EXPIRÓ! (Hace ${now - lastLeaseSeen}ms). Asesino Silencioso inicia elección.`);
+    lastLeaseSeen = Date.now(); 
     startElection();
   }
 }
@@ -161,70 +159,54 @@ function checkLeaderStatus() {
 function startElection() {
   if (electionInProgress) return;
   electionInProgress = true;
-  lastHeartbeatTime = Date.now(); // Reset timer para no spammear
-
+  lastHeartbeatTime = Date.now(); 
   console.log(`[BULLY] Convocando elección... Buscando nodos con prioridad > ${MY_PRIORITY}`);
 
-  // 1. Enviar mensaje ELECTION a todos los nodos con prioridad superior
   client.publish(config.topics.election.messages, JSON.stringify({
     type: 'ELECTION',
     fromPriority: MY_PRIORITY
   }));
 
-  // 2. Esperar respuesta (ALIVE)
   setTimeout(() => {
     if (electionInProgress) {
-      // Si llegamos aquí y electionInProgress sigue true, es que NADIE respondió ALIVE.
-      // ¡Significa que somos el nodo vivo con mayor prioridad!
       declareVictory();
     }
   }, ELECTION_TIMEOUT);
 }
 
 function handleElectionMessages(topic, payload) {
-  // A. HEARTBEATS
   if (topic === config.topics.election.heartbeat) {
     if (payload.type === 'PONG' && payload.fromPriority > MY_PRIORITY) {
-      // El líder respondió, todo está bien.
       lastHeartbeatTime = Date.now();
     }
     return;
   }
 
-  // B. MENSAJES DE ELECCIÓN
   if (topic === config.topics.election.messages) {
-    // Si alguien con MENOR prioridad inicia elección, le decimos que estamos vivos
     if (payload.type === 'ELECTION' && payload.fromPriority < MY_PRIORITY) {
       console.log(`[BULLY] Recibida elección de inferior (${payload.fromPriority}). Enviando ALIVE.`);
       client.publish(config.topics.election.messages, JSON.stringify({
         type: 'ALIVE', toPriority: payload.fromPriority, fromPriority: MY_PRIORITY
       }));
-      // E iniciamos nuestra propia elección por si acaso el líder real murió
       startElection();
     }
-    // Si recibimos ALIVE de alguien SUPERIOR, nos callamos y esperamos
     else if (payload.type === 'ALIVE' && payload.fromPriority > MY_PRIORITY) {
       console.log(`[BULLY] Recibido ALIVE de superior (${payload.fromPriority}). Me retiro.`);
-      electionInProgress = false; // Dejamos de intentar ser líderes
+      electionInProgress = false; 
     }
     return;
   }
 
-  // C. ANUNCIO DE COORDINADOR (VICTORY)
   if (topic === config.topics.election.coordinator) {
     console.log(`[BULLY] Nuevo Coordinador electo: ${payload.coordinatorId} (Prio: ${payload.priority})`);
     currentLeaderPriority = payload.priority;
-    lastHeartbeatTime = Date.now(); // El líder está vivo
+    lastLeaseSeen = Date.now(); 
     electionInProgress = false;
 
-    // Chequear si soy yo (por si acaso)
     if (payload.priority === MY_PRIORITY) {
       becomeCoordinator();
     } else {
-      isCoordinator = false;
-      // Dejar de escuchar peticiones de mutex si antes era coordinador
-      client.unsubscribe(config.topics.mutex_request);
-      client.unsubscribe(config.topics.mutex_release);
+      if (isCoordinator) stepDown();
     }
   }
 }
@@ -238,27 +220,55 @@ function declareVictory() {
 
 function becomeCoordinator() {
   if (isCoordinator) return;
+
+  // --- [FASE 3] RECUPERACIÓN DE ESTADO (WAL) ---
+  // Recuperamos la cola del disco ANTES de declararnos listos
+  const restoredQueue = restoreStateFromWAL();
+
   isCoordinator = true;
   electionInProgress = false;
-  console.log(`[ROLE] *** ASCENDIDO A COORDINADOR DE BLOQUEO ***`);
+  console.log(`[ROLE] *** ASCENDIDO A COORDINADOR (LÍDER) ***`);
 
-  // Reiniciar estado del mutex (para evitar bloqueos heredados)
-  coord_isLockAvailable = true;
+  renewLease(); 
+  if (leaseTimeout) clearInterval(leaseTimeout);
+  leaseTimeout = setInterval(renewLease, LEASE_RENEWAL);
+
+  coord_isLockAvailable = true; 
   coord_lockHolder = null;
-  coord_waitingQueue = [];
+  coord_waitingQueue = restoredQueue; // <--- ASIGNAMOS LA COLA RECUPERADA
 
-  // Suscribirse a los tópicos que debe escuchar el líder
   client.subscribe(config.topics.mutex_request, { qos: 1 });
   client.subscribe(config.topics.mutex_release, { qos: 1 });
 
-  // Publicar estado inicial
   publishCoordStatus();
+
+  // Si hay gente esperando recuperada y el recurso está libre, atendemos al primero
+  if (coord_isLockAvailable && coord_waitingQueue.length > 0) {
+      const next = coord_waitingQueue.shift();
+      // Registrar REMOVE en WAL
+      writeToWAL('REMOVE', next); 
+      grantCoordLock(next);
+  }
+}
+
+function stepDown() {
+  isCoordinator = false;
+  if (leaseTimeout) clearInterval(leaseTimeout);
+  console.log('[ROLE] Descendido a Seguidor (Step Down).');
+  client.unsubscribe(config.topics.mutex_request);
+  client.unsubscribe(config.topics.mutex_release);
+  lastLeaseSeen = Date.now();
+}
+
+function renewLease() {
+  if (!isCoordinator) return;
+  const payload = JSON.stringify({ coordinatorId: DEVICE_ID, timestamp: Date.now() });
+  client.publish(TOPIC_LEASE, payload, { qos: 0 });
 }
 
 // ============================================================================
-//                  LÓGICA DE SERVIDOR MUTEX (Solo si isCoordinator)
+//                  LÓGICA DE SERVIDOR MUTEX
 // ============================================================================
-// (Esta lógica es idéntica a la de lock-coordinator.js, ahora embebida aquí)
 
 function handleCoordRequest(requesterId) {
   console.log(`[COORD] Procesando solicitud de: ${requesterId}`);
@@ -266,6 +276,10 @@ function handleCoordRequest(requesterId) {
     grantCoordLock(requesterId);
   } else {
     if (!coord_waitingQueue.includes(requesterId) && coord_lockHolder !== requesterId) {
+      console.log(`[WAL] Escribiendo ADD para ${requesterId}`);
+      // --- [FASE 3] Escribir en WAL (ADD) ---
+      writeToWAL('ADD', requesterId);
+      
       coord_waitingQueue.push(requesterId);
     }
   }
@@ -277,8 +291,14 @@ function handleCoordRelease(requesterId) {
     console.log(`[COORD] Liberado por: ${requesterId}`);
     coord_lockHolder = null;
     coord_isLockAvailable = true;
+    
     if (coord_waitingQueue.length > 0) {
-      grantCoordLock(coord_waitingQueue.shift());
+      // Extraemos al siguiente de la cola
+      const next = coord_waitingQueue.shift();
+      // --- [FASE 3] Escribir en WAL (REMOVE) ---
+      writeToWAL('REMOVE', next);
+      
+      grantCoordLock(next);
     }
   }
   publishCoordStatus();
@@ -317,7 +337,7 @@ function syncClock() {
 }
 
 function requestCalibration() {
-  if (sensorState === 'IDLE' && !isCoordinator) { // El coordinador no se auto-solicita en este ejemplo simple
+  if (sensorState === 'IDLE' && !isCoordinator) { 
     console.log(`[MUTEX-CLIENT] Solicitando...`);
     sensorState = 'REQUESTING';
     client.publish(config.topics.mutex_request, JSON.stringify({ deviceId: DEVICE_ID }), { qos: 1 });
@@ -338,7 +358,9 @@ function releaseLock() {
 
 function publishTelemetry() {
   lamportClock++;
-  vectorClock[PROCESS_ID]++;
+  if (vectorClock[PROCESS_ID] !== undefined) {
+      vectorClock[PROCESS_ID]++;
+  }
   const correctedTime = new Date(getSimulatedTime().getTime() + clockOffset);
 
   const telemetryData = {
@@ -350,7 +372,61 @@ function publishTelemetry() {
     clock_offset: clockOffset.toFixed(0),
     lamport_ts: lamportClock,
     vector_clock: [...vectorClock],
-    sensor_state: isCoordinator ? 'COORDINATOR' : sensorState // Mostrar rol especial si es líder
+    sensor_state: isCoordinator ? 'COORDINATOR' : sensorState 
   };
   client.publish(config.topics.telemetry(DEVICE_ID), JSON.stringify(telemetryData));
+}
+
+// ============================================================================
+//                        PERSISTENCIA (WAL) - FASE 3
+// ============================================================================
+
+function writeToWAL(action, deviceId) {
+  // Formato simple: JSON por línea
+  const logEntry = JSON.stringify({ action, deviceId, timestamp: Date.now() });
+  try {
+    // appendFileSync bloquea un poco el proceso pero garantiza consistencia
+    fs.appendFileSync(WAL_FILE, logEntry + '\n');
+  } catch (err) {
+    console.error('[WAL] Error escribiendo en disco:', err.message);
+  }
+}
+
+function restoreStateFromWAL() {
+  console.log('[WAL] Iniciando recuperación de estado...');
+  
+  if (!fs.existsSync(WAL_FILE)) {
+    console.log('[WAL] No existe archivo de log previo. Iniciando limpio.');
+    return [];
+  }
+
+  const tempQueue = [];
+  try {
+    const fileContent = fs.readFileSync(WAL_FILE, 'utf-8');
+    const lines = fileContent.split('\n');
+
+    lines.forEach(line => {
+      if (!line.trim()) return; 
+      try {
+        const entry = JSON.parse(line);
+        if (entry.action === 'ADD') {
+          if (!tempQueue.includes(entry.deviceId)) {
+            tempQueue.push(entry.deviceId);
+          }
+        } else if (entry.action === 'REMOVE') {
+          // FIFO: el remove siempre saca al primero que entró
+          tempQueue.shift();
+        }
+      } catch (e) {
+        console.warn('[WAL] Línea corrupta en log:', line);
+      }
+    });
+
+    console.log(`[RECOVERY] Restored queue: [${tempQueue.join(', ')}]`);
+    return tempQueue;
+
+  } catch (err) {
+    console.error('[WAL] Error crítico leyendo WAL:', err.message);
+    return [];
+  }
 }
