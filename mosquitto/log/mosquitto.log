@@ -1373,3 +1373,47 @@
 1764380708: mosquitto version 2.0.22 terminating
 1764380708: Saving in-memory database to /mosquitto/data//mosquitto.db.
 1764380708: Client web_monitor_a401e2 closed its connection.
+1764381078: mosquitto version 2.0.22 starting
+1764381078: Config loaded from /mosquitto/config/mosquitto.conf.
+1764381078: Opening ipv4 listen socket on port 1883.
+1764381078: Opening ipv6 listen socket on port 1883.
+1764381078: Opening websockets listen socket on port 9001.
+1764381078: mosquitto version 2.0.22 running
+1764381084: New connection from 172.18.0.4:42148 on port 1883.
+1764381084: New client connected from 172.18.0.4:42148 as time_server_01 (p2, c1, k60).
+1764381084: New connection from 172.18.0.5:44010 on port 1883.
+1764381084: New client connected from 172.18.0.5:44010 as persistence_sub_ad9cfe (p2, c1, k60).
+1764381091: New connection from 172.18.0.7:56212 on port 1883.
+1764381091: New client connected from 172.18.0.7:56212 as pub_sensor-4_b23 (p2, c1, k60).
+1764381092: New connection from 172.18.0.9:36448 on port 1883.
+1764381092: New connection from 172.18.0.10:34376 on port 1883.
+1764381092: New client connected from 172.18.0.10:34376 as pub_sensor-3_371 (p2, c1, k60).
+1764381092: New client connected from 172.18.0.9:36448 as pub_sensor-1_3dc (p2, c1, k60).
+1764381092: New connection from 172.18.0.8:43220 on port 1883.
+1764381092: New connection from 172.18.0.11:52476 on port 1883.
+1764381092: New client connected from 172.18.0.8:43220 as pub_sensor-5_a59 (p2, c1, k60).
+1764381092: New client connected from 172.18.0.11:52476 as pub_sensor-2_6db (p2, c1, k60).
+1764381122: Client pub_sensor-3_371 closed its connection.
+1764381122: Client pub_sensor-1_3dc closed its connection.
+1764381127: Client pub_sensor-4_b23 closed its connection.
+1764381128: Client pub_sensor-5_a59 closed its connection.
+1764381128: Client pub_sensor-2_6db closed its connection.
+1764381140: New client connected from ::ffff:172.18.0.1:33650 as web_monitor_a401e2 (p2, c1, k60).
+1764381199: Client web_monitor_a401e2 closed its connection.
+1764381323: New client connected from ::ffff:172.18.0.1:43528 as web_monitor_a401e2 (p2, c1, k60).
+1764381380: Client web_monitor_a401e2 closed its connection.
+1764381501: New client connected from ::ffff:172.18.0.1:57564 as web_monitor_a401e2 (p2, c1, k60).
+1764381534: New connection from ::1:36216 on port 1883.
+1764381534: New client connected from ::1:36216 as auto-31A56D2F-1D14-0115-3278-92D9CD14CD92 (p2, c1, k60).
+1764381535: Client auto-31A56D2F-1D14-0115-3278-92D9CD14CD92 disconnected.
+1764381559: Client web_monitor_a401e2 closed its connection.
+1764381568: New connection from 172.18.0.7:46528 on port 1883.
+1764381568: New client connected from 172.18.0.7:46528 as pub_sensor-5_592 (p2, c1, k60).
+1764381600: Client pub_sensor-5_592 closed its connection.
+1764381678: New client connected from ::ffff:172.18.0.1:56784 as web_monitor_a401e2 (p2, c1, k60).
+1764381770: Client web_monitor_a401e2 closed its connection.
+1764381776: Client <unknown> closed its connection.
+1764381784: Client <unknown> closed its connection.
+1764381858: New client connected from ::ffff:172.18.0.1:39944 as web_monitor_a401e2 (p2, c1, k60).
+1764381919: Client web_monitor_a401e2 closed its connection.
+1764381924: New client connected from ::ffff:172.18.0.1:42022 as web_monitor_a401e2 (p2, c1, k60).
