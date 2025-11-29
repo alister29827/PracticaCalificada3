@@ -1,0 +1,14 @@
+{"action":"ADD","deviceId":"sensor-3","timestamp":1763780443947}
+{"action":"ADD","deviceId":"sensor-1","timestamp":1763780446799}
+{"action":"ADD","deviceId":"sensor-4","timestamp":1763780447080}
+{"action":"REMOVE","deviceId":"sensor-3","timestamp":1763780447971}
+{"action":"REMOVE","deviceId":"sensor-1","timestamp":1764379232490}
+{"action":"ADD","deviceId":"sensor-2","timestamp":1764379269501}
+{"action":"ADD","deviceId":"sensor-3","timestamp":1764379274712}
+{"action":"REMOVE","deviceId":"sensor-4","timestamp":1764380565222}
+{"action":"ADD","deviceId":"sensor-1","timestamp":1764380591004}
+{"action":"REMOVE","deviceId":"sensor-2","timestamp":1764380668028}
+{"action":"REMOVE","deviceId":"sensor-3","timestamp":1764381093042}
+{"action":"ADD","deviceId":"sensor-2","timestamp":1764381118507}
+{"action":"ADD","deviceId":"sensor-4","timestamp":1764381119271}
+{"action":"REMOVE","deviceId":"sensor-1","timestamp":1764381568736}
